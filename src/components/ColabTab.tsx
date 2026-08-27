@@ -116,6 +116,10 @@ export const ColabTab: React.FC<ColabTabProps> = ({ onAudioGenerated }) => {
   // AbortController for canceling ongoing generation
   const abortControllerRef = useRef<AbortController | null>(null);
 
+  // Modal to view / copy Colab Python Script
+  const [showCodeModal, setShowCodeModal] = useState<boolean>(false);
+  const [copiedCode, setCopiedCode] = useState<boolean>(false);
+
   // Load saved voices on mount
   const loadSavedVoiceProfiles = async () => {
     try {
@@ -531,15 +535,26 @@ export const ColabTab: React.FC<ColabTabProps> = ({ onAudioGenerated }) => {
             </p>
           </div>
 
-          <a
-            href="https://colab.research.google.com"
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-purple-600/80 hover:bg-purple-600 text-white rounded-xl text-xs font-semibold transition"
-          >
-            <span>Mở Google Colab</span>
-            <ExternalLink className="w-3 h-3" />
-          </a>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setShowCodeModal(true)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-purple-300 rounded-xl text-xs font-semibold transition cursor-pointer shadow-sm"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-purple-400" />
+              <span>Lấy Code Python Colab</span>
+            </button>
+
+            <a
+              href="https://colab.research.google.com"
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-purple-600/80 hover:bg-purple-600 text-white rounded-xl text-xs font-semibold transition"
+            >
+              <span>Mở Google Colab</span>
+              <ExternalLink className="w-3 h-3" />
+            </a>
+          </div>
         </div>
       </div>
 
@@ -1081,6 +1096,270 @@ export const ColabTab: React.FC<ColabTabProps> = ({ onAudioGenerated }) => {
           )}
         </div>
       </div>
+
+      {/* Modal Code Python Colab */}
+      {showCodeModal && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-4xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
+            <div className="p-4 border-b border-slate-800 flex items-center justify-between bg-slate-950/60">
+              <div className="flex items-center gap-2">
+                <Cpu className="w-5 h-5 text-purple-400" />
+                <div>
+                  <h3 className="text-sm font-bold text-slate-100">
+                    Mã Nguồn Python F5-TTS 1000h Chạy Trên Google Colab
+                  </h3>
+                  <p className="text-[11px] text-slate-400">
+                    Bao gồm cả Giao diện Gradio Trực quan trên Colab và Cổng API kết nối với Web Tool.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowCodeModal(false)}
+                className="p-1.5 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-slate-200 transition"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-4 overflow-y-auto flex-1 bg-slate-950 font-mono text-xs text-slate-300">
+              <pre className="whitespace-pre-wrap">{PYTHON_COLAB_SCRIPT}</pre>
+            </div>
+
+            <div className="p-4 border-t border-slate-800 bg-slate-950/80 flex items-center justify-between">
+              <span className="text-xs text-slate-400">
+                Chạy trên Google Colab với cấu hình <b>Runtime → T4 GPU</b>.
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard.writeText(PYTHON_COLAB_SCRIPT);
+                    setCopiedCode(true);
+                    setTimeout(() => setCopiedCode(false), 2500);
+                  }}
+                  className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white font-semibold text-xs rounded-xl transition flex items-center gap-1.5 shadow-lg shadow-purple-600/30"
+                >
+                  {copiedCode ? <CheckCircle className="w-4 h-4 text-white" /> : <Sparkles className="w-4 h-4" />}
+                  <span>{copiedCode ? 'Đã Sao Chép Mã!' : 'Sao Chép Mã Colab'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowCodeModal(false)}
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold rounded-xl transition"
+                >
+                  Đóng
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
+
+const PYTHON_COLAB_SCRIPT = `# ============================================================
+# 🇻🇳 F5-TTS VIETNAMESE 1000H (HYNT ViVoice) - BẢN ĐẦY ĐỦ GIAO DIỆN & API
+# ============================================================
+
+import os
+import sys
+import subprocess
+import shutil
+import tempfile
+import unicodedata
+import re
+import time
+import base64
+from pathlib import Path
+import torch
+
+if not torch.cuda.is_available():
+    raise RuntimeError("❌ Không có GPU. Vào menu Runtime > Change runtime type > Chọn T4 GPU.")
+
+print("GPU :", torch.cuda.get_device_name(0))
+
+# [1/6] Cài đặt dependencies
+print("\\n[1/6] Installing dependencies...")
+packages = [
+    "gradio==4.44.1",
+    "fastapi",
+    "uvicorn",
+    "huggingface_hub",
+    "cached_path",
+    "soundfile",
+    "accelerate",
+    "ema-pytorch",
+    "einx",
+    "einops",
+    "hydra-core",
+    "jieba",
+    "pypinyin",
+    "librosa",
+    "pydub",
+    "safetensors",
+    "torchdiffeq",
+    "tqdm",
+    "transformers",
+    "vocos",
+    "x-transformers"
+]
+
+subprocess.run([sys.executable, "-m", "pip", "install", "-q"] + packages, check=True)
+print("✅ Cài đặt xong!")
+
+# [2/6] Tải F5-TTS Vietnamese Space
+print("\\n[2/6] Loading HYNT source...")
+from huggingface_hub import snapshot_download
+SPACE_REPO = "hynt/F5-TTS-Vietnamese-100h"
+SPACE_DIR = snapshot_download(repo_id=SPACE_REPO, repo_type="space")
+
+if SPACE_DIR in sys.path:
+    sys.path.remove(SPACE_DIR)
+sys.path.insert(0, SPACE_DIR)
+
+for name in list(sys.modules.keys()):
+    if name == "f5_tts" or name.startswith("f5_tts."):
+        del sys.modules[name]
+
+from f5_tts.model import DiT
+from f5_tts.infer.utils_infer import (
+    load_vocoder,
+    load_model,
+    infer_process,
+    preprocess_ref_audio_text
+)
+print("✅ Nạp mã nguồn xong!")
+
+# [3/6] Tải ViVoice 1000h
+print("\\n[3/6] Loading ViVoice 1000h...")
+MODEL_REPO = "hynt/F5-TTS-Vietnamese-ViVoice"
+MODEL_DIR = "/content/HYNT-Vietnamese-1000h"
+os.makedirs(MODEL_DIR, exist_ok=True)
+
+from huggingface_hub import hf_hub_download
+MODEL_PATH = hf_hub_download(repo_id=MODEL_REPO, filename="model_last.pt", local_dir=MODEL_DIR)
+VOCAB_PATH = hf_hub_download(repo_id=MODEL_REPO, filename="config.json", local_dir=MODEL_DIR)
+
+# [4/6] Load Model vào GPU
+print("\\n[4/6] Loading Model into GPU...")
+vocoder = load_vocoder()
+model = load_model(
+    DiT,
+    dict(dim=1024, depth=22, heads=16, ff_mult=2, text_dim=512, conv_layers=4),
+    ckpt_path=MODEL_PATH,
+    vocab_file=VOCAB_PATH
+)
+model = model.to("cuda")
+model.eval()
+print("✅ MODEL READY ON CUDA!")
+
+# [5/6] Chuẩn hóa Tiếng Việt (Tránh nuốt chữ / mất chữ)
+def normalize_vietnamese(text):
+    if not text:
+        return ""
+    text = unicodedata.normalize("NFC", str(text)).strip()
+    text = " " + text + " "
+    text = text.replace(" . . ", " . ").replace(" .. ", " . ")
+    text = text.replace(" , , ", " , ").replace(" ,, ", " , ")
+    text = text.replace('"', "")
+    text = " ".join(text.split())
+    return text.lower()
+
+import soundfile as sf
+import gradio as gr
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+
+def generate_tts(ref_audio, ref_text, gen_text, speed=1.0, nfe_step=64, cfg_strength=2.0):
+    if not ref_audio:
+        raise gr.Error("Vui lòng tải lên hoặc ghi âm giọng mẫu!")
+    if not gen_text:
+        raise gr.Error("Vui lòng nhập văn bản cần đọc!")
+
+    ref_text = normalize_vietnamese(ref_text)
+    gen_text = normalize_vietnamese(gen_text)
+
+    # Tiền xử lý audio mẫu
+    ref_audio_final, _ = preprocess_ref_audio_text(ref_audio, "")
+
+    with torch.inference_mode():
+        final_wave, final_sr, _ = infer_process(
+            ref_audio_final,
+            ref_text,
+            gen_text,
+            model,
+            vocoder,
+            speed=float(speed),
+            nfe_step=int(nfe_step),
+            cfg_strength=float(cfg_strength)
+        )
+
+    output_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
+    sf.write(output_file, final_wave, final_sr)
+    return output_file
+
+# [6/6] Khởi tạo Giao diện Gradio + Cổng FastAPI /api/generate
+custom_app = FastAPI()
+custom_app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@custom_app.post("/api/generate")
+async def api_generate(req: Request):
+    try:
+        body = await req.json()
+        audio_b64 = body.get("audio_base64", "")
+        ref_t = body.get("ref_text", "")
+        gen_t = body.get("gen_text", "")
+        spd = float(body.get("speed", 1.0))
+        nfe = int(body.get("nfe_step", 64))
+        cfg = float(body.get("cfg_strength", 2.0))
+
+        clean_b64 = re.sub(r"^data:audio/\\w+;base64,", "", audio_b64)
+        raw_audio = base64.b64decode(clean_b64)
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
+            tf.write(raw_audio)
+            ref_audio_path = tf.name
+
+        out_wav = generate_tts(ref_audio_path, ref_t, gen_t, speed=spd, nfe_step=nfe, cfg_strength=cfg)
+        with open(out_wav, "rb") as f:
+            out_b64 = base64.b64encode(f.read()).decode("utf-8")
+        return JSONResponse({"audio_base64": f"data:audio/wav;base64,{out_b64}"})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+with gr.Blocks(title="🇻🇳 F5-TTS Vietnamese 1000h - Voice Clone") as demo:
+    gr.Markdown("# 🇻🇳 F5-TTS Vietnamese 1000h (ViVoice) - Giao Diện Trực Tiếp")
+    gr.Markdown("Nhân bản giọng nói Tiếng Việt chỉ từ 3-10s audio mẫu. Hỗ trợ chạy trực tiếp trên Colab hoặc dán link vào Web Tool.")
+    with gr.Row():
+        with gr.Column():
+            ref_audio_input = gr.Audio(label="Audio Mẫu (3 - 10s)", type="filepath")
+            ref_text_input = gr.Textbox(label="Phụ đề mẫu (Lời nói trong audio)", placeholder="Gõ đúng lời thoại mẫu để AI học ngữ điệu...")
+            gen_text_input = gr.Textbox(label="Văn bản cần AI đọc", lines=4, placeholder="Nhập văn bản tiếng Việt cần nhân bản giọng...")
+            with gr.Row():
+                speed_input = gr.Slider(minimum=0.5, maximum=2.0, value=1.0, step=0.05, label="Tốc độ (Speed)")
+                nfe_input = gr.Slider(minimum=16, maximum=128, value=64, step=8, label="NFE Steps (64 chuẩn)")
+                cfg_input = gr.Slider(minimum=1.0, maximum=3.5, value=2.0, step=0.1, label="CFG (Độ bám giọng)")
+            btn = gr.Button("⚡ Bắt Đầu Sinh Giọng", variant="primary")
+        with gr.Column():
+            output_audio = gr.Audio(label="Kết Quả Âm Thanh", type="filepath")
+
+    btn.click(
+        fn=generate_tts,
+        inputs=[ref_audio_input, ref_text_input, gen_text_input, speed_input, nfe_input, cfg_input],
+        outputs=output_audio,
+        api_name="predict"
+    )
+
+app = gr.mount_gradio_app(custom_app, demo, path="/")
+demo.queue(max_size=20)
+demo.launch(share=True, show_error=True, app_kwargs={"app": app})
+`;
+
