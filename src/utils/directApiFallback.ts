@@ -372,6 +372,39 @@ export async function predictColabDirect(params: {
     cleanUrl = `https://${cleanUrl}`;
   }
 
+  // 0. Direct FastAPI Endpoint /api/generate (For Cloudflare Tunnels & custom FastAPI endpoints)
+  try {
+    const fastApiRes = await fetch(`${cleanUrl}/api/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        audio_base64: refAudioBase64,
+        ref_text: refText || '',
+        gen_text: genText,
+        speed: Number(speed) || 1.0,
+        nfe_step: Number(nfeStep) || 64,
+        cfg_strength: Number(cfgStrength) || 2.0,
+      }),
+      signal,
+    });
+
+    if (fastApiRes.ok) {
+      const fastApiJson = await fastApiRes.json();
+      if (fastApiJson.audio_base64) {
+        return fastApiJson.audio_base64.startsWith('data:')
+          ? fastApiJson.audio_base64
+          : `data:audio/wav;base64,${fastApiJson.audio_base64}`;
+      }
+      if (fastApiJson.audio_url) {
+        const aUrl = fastApiJson.audio_url;
+        return aUrl.startsWith('http') ? aUrl : `${cleanUrl}${aUrl.startsWith('/') ? '' : '/'}${aUrl}`;
+      }
+    }
+  } catch (fastErr: any) {
+    if (fastErr.name === 'AbortError' || signal?.aborted) throw fastErr;
+    console.warn('Direct FastAPI fallback, trying Gradio pipeline:', fastErr);
+  }
+
   // 1. Upload audio file if needed
   let uploadedFilePath = '';
   try {

@@ -673,6 +673,48 @@ app.post("/api/colab/predict", async (req, res) => {
     cleanUrl = `https://${cleanUrl}`;
   }
 
+  // 0. Priority: Direct FastAPI /api/generate Endpoint (Supports trycloudflare.com & direct FastAPI tunnel)
+  try {
+    const fastApiRes = await fetch(`${cleanUrl}/api/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        audio_base64: refAudioBase64,
+        ref_text: refText || "",
+        gen_text: genText,
+        speed: Number(speed) || 1.0,
+        nfe_step: Number(nfeStep) || 64,
+        cfg_strength: Number(cfgStrength) || 2.0,
+      }),
+      signal: AbortSignal.timeout(180000),
+    });
+
+    if (fastApiRes.ok) {
+      const fastApiJson = await fastApiRes.json();
+      if (fastApiJson.audio_base64) {
+        const rawB64 = fastApiJson.audio_base64.replace(/^data:audio\/\w+;base64,/, "");
+        const filename = `fastapi_colab_${Date.now()}.wav`;
+        const filepath = path.join(OUTPUTS_DIR, filename);
+        fs.writeFileSync(filepath, Buffer.from(rawB64, "base64"));
+        return res.json({
+          success: true,
+          result: `/outputs/${filename}`,
+          directUrl: fastApiJson.audio_base64,
+        });
+      }
+      if (fastApiJson.audio_url) {
+        const aUrl = fastApiJson.audio_url.startsWith("http") ? fastApiJson.audio_url : `${cleanUrl}${fastApiJson.audio_url.startsWith("/") ? "" : "/"}${fastApiJson.audio_url}`;
+        return res.json({
+          success: true,
+          result: aUrl,
+          directUrl: aUrl,
+        });
+      }
+    }
+  } catch (fastApiErr) {
+    console.warn("Direct FastAPI /api/generate failed, proceeding to Gradio pipeline:", fastApiErr);
+  }
+
   // 1. Upload audio to Gradio /upload or /gradio_api/upload if base64 provided
   let uploadedGradioAudio: any = null;
   if (refAudioBase64) {
