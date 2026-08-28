@@ -1,6 +1,6 @@
 {
   "name": "Tool Giọng Nói Chuyên Nghiệp",
-  "description": "A professional AI voice synthesis and text-to-speech studio supporting GenMax API (ElevenLabs, MiniMax), browser & local speech engines, voice cloning, and audio management.",
+  "description": "A professional AI voice synthesis and text-to-speech studio supporting ElevenLabs Official API, GenMax API (ElevenLabs, MiniMax), browser & local speech engines, voice cloning, and audio management.",
   "requestFramePermissions": ["microphone"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

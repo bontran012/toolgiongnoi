@@ -28,6 +28,11 @@ interface KeyInfo {
   name: string;
   balance: number;
   email: string;
+  source?: "elevenlabs" | "genmax";
+  tier?: string;
+  limit?: number;
+  used?: number;
+  status?: string;
 }
 
 function loadKeys(): Record<string, KeyInfo> {
@@ -38,9 +43,13 @@ function loadKeys(): Record<string, KeyInfo> {
       const formatted: Record<string, KeyInfo> = {};
       for (const [k, v] of Object.entries(data)) {
         if (typeof v === "string") {
-          formatted[k] = { name: v, balance: -1, email: "" };
+          formatted[k] = { name: v, balance: -1, email: "", source: "genmax" };
         } else {
-          formatted[k] = v as KeyInfo;
+          const item = v as KeyInfo;
+          formatted[k] = {
+            ...item,
+            source: item.source || (item.name?.toLowerCase().includes("eleven") ? "elevenlabs" : "genmax"),
+          };
         }
       }
       return formatted;
@@ -59,33 +68,155 @@ function saveKeys(keys: Record<string, KeyInfo>) {
   }
 }
 
-async function fetchBalanceFromApi(apiKey: string): Promise<{ balance: number; email: string }> {
-  try {
-    const res = await fetch("https://api.genmax.io/v1/auth/me", {
-      headers: { "xi-api-key": apiKey },
-      signal: AbortSignal.timeout(6000),
-    });
-    if (res.ok) {
-      const data = await res.json();
-      return {
-        balance: data.credit_balance ?? data.balance ?? 0,
-        email: data.email || "",
-      };
+async function fetchBalanceFromApi(
+  apiKey: string,
+  preferredSource?: "elevenlabs" | "genmax"
+): Promise<{
+  balance: number;
+  email: string;
+  source: "elevenlabs" | "genmax";
+  tier?: string;
+  limit?: number;
+  used?: number;
+  status?: string;
+  errorMessage?: string;
+}> {
+  let lastErrorMessage = "";
+
+  const tryElevenLabs = async () => {
+    try {
+      // Step 1: Query ElevenLabs user endpoint (/v1/user) - provides subscription + email + tier
+      const userRes = await fetch("https://api.elevenlabs.io/v1/user", {
+        headers: { "xi-api-key": apiKey.trim() },
+        signal: AbortSignal.timeout(6500),
+      });
+      
+      if (userRes.ok) {
+        const uData = await userRes.json();
+        const sub = uData.subscription || {};
+        const charLimit = typeof sub.character_limit === "number" ? sub.character_limit : 0;
+        const charCount = typeof sub.character_count === "number" ? sub.character_count : 0;
+        const remaining = Math.max(0, charLimit - charCount);
+        return {
+          balance: remaining,
+          email: uData.email || uData.first_name || "",
+          source: "elevenlabs" as const,
+          tier: sub.tier || "Active",
+          limit: charLimit,
+          used: charCount,
+          status: sub.status || "active",
+        };
+      } else {
+        try {
+          const errData = await userRes.json();
+          const detail = errData.detail || errData;
+          if (detail?.status === "api_key_id_used_as_api_key" || detail?.message?.includes("API key ID used as API key")) {
+            lastErrorMessage = "Bạn đang copy nhầm 'API Key ID' thay vì 'API Key Secret'. ElevenLabs quy định API Key dùng để gọi API phải bắt đầu bằng 'sk_...'. Hãy vào https://elevenlabs.io/app/settings/api-keys tạo hoặc rotate key mới và copy mã bắt đầu bằng sk_!";
+          } else if (detail?.message) {
+            lastErrorMessage = `ElevenLabs: ${detail.message}`;
+          }
+        } catch {}
+      }
+
+      // Step 2: Fallback to /v1/user/subscription endpoint
+      const subRes = await fetch("https://api.elevenlabs.io/v1/user/subscription", {
+        headers: { "xi-api-key": apiKey.trim() },
+        signal: AbortSignal.timeout(6500),
+      });
+      if (subRes.ok) {
+        const subData = await subRes.json();
+        const charLimit = typeof subData.character_limit === "number" ? subData.character_limit : 0;
+        const charCount = typeof subData.character_count === "number" ? subData.character_count : 0;
+        const remaining = Math.max(0, charLimit - charCount);
+        return {
+          balance: remaining,
+          email: "",
+          source: "elevenlabs" as const,
+          tier: subData.tier || "Active",
+          limit: charLimit,
+          used: charCount,
+          status: subData.status || "active",
+        };
+      }
+    } catch (e: any) {
+      if (!lastErrorMessage) lastErrorMessage = e.message || "Lỗi kết nối ElevenLabs";
     }
-  } catch (err) {
-    // Network or timeout
+    return null;
+  };
+
+  const tryGenMax = async () => {
+    try {
+      const res = await fetch("https://api.genmax.io/v1/auth/me", {
+        headers: { "xi-api-key": apiKey.trim() },
+        signal: AbortSignal.timeout(6500),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        return {
+          balance: data.credit_balance ?? data.balance ?? 0,
+          email: data.email || "",
+          source: "genmax" as const,
+          tier: "GenMax",
+          limit: 0,
+          used: 0,
+          status: "active",
+        };
+      } else {
+        try {
+          const errData = await res.json();
+          if (errData.error) {
+            if (!lastErrorMessage) lastErrorMessage = `GenMax: ${errData.error}`;
+          }
+        } catch {}
+      }
+    } catch (err: any) {
+      if (!lastErrorMessage) lastErrorMessage = err.message || "Lỗi kết nối GenMax";
+    }
+    return null;
+  };
+
+  // Cross-fallback logic:
+  if (preferredSource === "elevenlabs") {
+    const eleResult = await tryElevenLabs();
+    if (eleResult) return eleResult;
+    // Fallback to GenMax if user set elevenlabs but it's a GenMax key
+    const genResult = await tryGenMax();
+    if (genResult) return genResult;
+  } else if (preferredSource === "genmax") {
+    const genResult = await tryGenMax();
+    if (genResult) return genResult;
+    // Fallback to ElevenLabs if user set genmax but it's an ElevenLabs key
+    const eleResult = await tryElevenLabs();
+    if (eleResult) return eleResult;
+  } else {
+    // Auto-detect: try ElevenLabs first then GenMax
+    const eleResult = await tryElevenLabs();
+    if (eleResult) return eleResult;
+    const genResult = await tryGenMax();
+    if (genResult) return genResult;
   }
-  return { balance: -1, email: "" };
+
+  return {
+    balance: -1,
+    email: "",
+    source: preferredSource || "genmax",
+    errorMessage: lastErrorMessage || "Không thể xác thực API Key với ElevenLabs hoặc GenMax.",
+  };
 }
 
 async function refreshAllBalancesBg() {
   const keys = loadKeys();
   let updated = false;
-  for (const k of Object.keys(keys)) {
-    const { balance, email } = await fetchBalanceFromApi(k);
-    if (balance !== -1) {
-      keys[k].balance = balance;
-      if (email) keys[k].email = email;
+  for (const [k, v] of Object.entries(keys)) {
+    const info = await fetchBalanceFromApi(k, v.source);
+    if (info.balance !== -1) {
+      keys[k].balance = info.balance;
+      if (info.email) keys[k].email = info.email;
+      keys[k].source = info.source;
+      if (info.tier) keys[k].tier = info.tier;
+      if (info.limit) keys[k].limit = info.limit;
+      if (info.used !== undefined) keys[k].used = info.used;
+      if (info.status) keys[k].status = info.status;
       updated = true;
     }
   }
@@ -102,19 +233,64 @@ refreshAllBalancesBg().catch(() => {});
 // Get all keys
 app.get("/api/keys", (req, res) => {
   const keys = loadKeys();
-  const list = Object.entries(keys).map(([k, v]) => ({
-    key: k,
-    name: v.name || "Key",
-    balance: v.balance ?? -1,
-    email: v.email || "",
-    label: `[${v.balance !== -1 ? v.balance.toLocaleString() : "?"} Cr] ${v.name || "Key"} (${k.slice(0, 8)}...)`,
-  }));
+  const list = Object.entries(keys).map(([k, v]) => {
+    const isEleven = v.source === "elevenlabs";
+    const unit = "Cre";
+    const srcTag = isEleven ? "ElevenLabs" : "GenMax";
+    const balDisplay = v.balance !== -1 ? v.balance.toLocaleString() : "?";
+    return {
+      key: k,
+      name: v.name || "Key",
+      balance: v.balance ?? -1,
+      email: v.email || "",
+      source: v.source || "genmax",
+      tier: v.tier || "",
+      limit: v.limit || 0,
+      used: v.used || 0,
+      status: v.status || "active",
+      label: `[${balDisplay} ${unit}] [${srcTag}] ${v.name || "Key"} (${k.slice(0, 8)}...)`,
+    };
+  });
   res.json({ keys: list, raw: keys });
+});
+
+// Check a single key on demand
+app.post("/api/keys/check", async (req, res) => {
+  const { apiKey, source } = req.body;
+  if (!apiKey || !apiKey.trim()) {
+    return res.status(400).json({ error: "Vui lòng nhập API Key cần kiểm tra!" });
+  }
+
+  const k = apiKey.trim();
+  const info = await fetchBalanceFromApi(k, source);
+  const keys = loadKeys();
+  if (keys[k]) {
+    if (info.balance !== -1) keys[k].balance = info.balance;
+    if (info.email) keys[k].email = info.email;
+    keys[k].source = info.source;
+    if (info.tier) keys[k].tier = info.tier;
+    if (info.limit) keys[k].limit = info.limit;
+    if (info.used !== undefined) keys[k].used = info.used;
+    if (info.status) keys[k].status = info.status;
+    saveKeys(keys);
+  }
+
+  res.json({
+    success: info.balance !== -1,
+    balance: info.balance,
+    email: info.email,
+    source: info.source,
+    tier: info.tier,
+    limit: info.limit,
+    used: info.used,
+    status: info.status,
+    errorMessage: info.errorMessage,
+  });
 });
 
 // Add / Update key
 app.post("/api/keys", async (req, res) => {
-  const { apiKey, name } = req.body;
+  const { apiKey, name, source } = req.body;
   if (!apiKey || !apiKey.trim() || !name || !name.trim()) {
     return res.status(400).json({ error: "Vui lòng nhập đủ Mã API Key và Tên gợi nhớ!" });
   }
@@ -123,33 +299,48 @@ app.post("/api/keys", async (req, res) => {
   const keyName = name.trim();
   const keys = loadKeys();
 
-  keys[k] = { name: keyName, balance: -1, email: "" };
+  keys[k] = { name: keyName, balance: -1, email: "", source: source as any };
   saveKeys(keys);
 
   // Check balance immediately
-  const { balance, email } = await fetchBalanceFromApi(k);
-  if (balance !== -1) {
-    keys[k].balance = balance;
-    keys[k].email = email;
+  const info = await fetchBalanceFromApi(k, source);
+  if (info.balance !== -1) {
+    keys[k].balance = info.balance;
+    if (info.email) keys[k].email = info.email;
+    keys[k].source = info.source;
+    if (info.tier) keys[k].tier = info.tier;
+    if (info.limit) keys[k].limit = info.limit;
+    if (info.used !== undefined) keys[k].used = info.used;
+    if (info.status) keys[k].status = info.status;
     saveKeys(keys);
   }
 
+  const isEleven = keys[k].source === "elevenlabs";
+  const unit = "Cre";
+  const srcTag = isEleven ? "ElevenLabs" : "GenMax";
+  const balDisplay = keys[k].balance !== -1 ? keys[k].balance.toLocaleString() : "?";
+
   res.json({
     success: true,
-    message: "Lưu Key thành công!",
+    message: `Lưu Key [${srcTag}] thành công! Đã kiểm tra số Cre: ${balDisplay} ${unit}`,
     key: {
       key: k,
       name: keys[k].name,
       balance: keys[k].balance,
       email: keys[k].email,
-      label: `[${keys[k].balance !== -1 ? keys[k].balance.toLocaleString() : "?"} Cr] ${keys[k].name} (${k.slice(0, 8)}...)`,
+      source: keys[k].source,
+      tier: keys[k].tier,
+      limit: keys[k].limit,
+      used: keys[k].used,
+      status: keys[k].status,
+      label: `[${balDisplay} ${unit}] [${srcTag}] ${keys[k].name} (${k.slice(0, 8)}...)`,
     },
   });
 });
 
 // Batch add / import keys
 app.post("/api/keys/batch", async (req, res) => {
-  const { rawText } = req.body;
+  const { rawText, defaultSource } = req.body;
   if (!rawText || !rawText.trim()) {
     return res.status(400).json({ error: "Vui lòng dán danh sách API Key!" });
   }
@@ -157,30 +348,37 @@ app.post("/api/keys/batch", async (req, res) => {
   const lines = rawText.split("\n").map((l: string) => l.trim()).filter(Boolean);
   const keys = loadKeys();
   let addedCount = 0;
-  const newKeysList: string[] = [];
+  const newKeysList: { key: string; source?: "elevenlabs" | "genmax" }[] = [];
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     let apiKey = line;
     let keyName = `Key ${Object.keys(keys).length + 1}`;
+    let itemSource: "elevenlabs" | "genmax" | undefined = defaultSource;
 
     if (line.includes("|")) {
       const parts = line.split("|");
       apiKey = parts[0].trim();
-      keyName = parts.slice(1).join("|").trim() || keyName;
+      keyName = parts[1]?.trim() || keyName;
+      if (parts[2]) {
+        const s = parts[2].trim().toLowerCase();
+        if (s.includes("eleven")) itemSource = "elevenlabs";
+        else if (s.includes("genmax")) itemSource = "genmax";
+      }
     } else if (line.includes(",")) {
       const parts = line.split(",");
       apiKey = parts[0].trim();
-      keyName = parts.slice(1).join(",").trim() || keyName;
+      keyName = parts[1]?.trim() || keyName;
     }
 
-    if (apiKey && apiKey.length > 10) {
+    if (apiKey && apiKey.length > 8) {
       keys[apiKey] = {
         name: keyName,
         balance: -1,
         email: "",
+        source: itemSource,
       };
-      newKeysList.push(apiKey);
+      newKeysList.push({ key: apiKey, source: itemSource });
       addedCount++;
     }
   }
@@ -189,12 +387,17 @@ app.post("/api/keys/batch", async (req, res) => {
 
   // Background check balance for newly added keys
   (async () => {
-    for (const k of newKeysList) {
-      const { balance, email } = await fetchBalanceFromApi(k);
+    for (const item of newKeysList) {
+      const info = await fetchBalanceFromApi(item.key, item.source);
       const currentKeys = loadKeys();
-      if (currentKeys[k]) {
-        if (balance !== -1) currentKeys[k].balance = balance;
-        if (email) currentKeys[k].email = email;
+      if (currentKeys[item.key]) {
+        if (info.balance !== -1) currentKeys[item.key].balance = info.balance;
+        if (info.email) currentKeys[item.key].email = info.email;
+        currentKeys[item.key].source = info.source;
+        if (info.tier) currentKeys[item.key].tier = info.tier;
+        if (info.limit) currentKeys[item.key].limit = info.limit;
+        if (info.used !== undefined) currentKeys[item.key].used = info.used;
+        if (info.status) currentKeys[item.key].status = info.status;
         saveKeys(currentKeys);
       }
     }
@@ -225,6 +428,476 @@ app.post("/api/keys/refresh", async (req, res) => {
   res.json({ success: true, keys });
 });
 
+// Fetch ElevenLabs Official Models & Voices (api.elevenlabs.io)
+app.get("/api/elevenlabs/data", async (req, res) => {
+  const { apiKey } = req.query as { apiKey?: string };
+  if (!apiKey) {
+    return res.status(400).json({ error: "Vui lòng chọn hoặc nhập API Key ElevenLabs!" });
+  }
+
+  const cleanKey = apiKey.trim();
+  const headers = { "xi-api-key": cleanKey };
+
+  try {
+    // Parallel fetch: Models, Voices, and User/Subscription Balance
+    const [balanceInfo, modelsResult, voicesResult] = await Promise.all([
+      fetchBalanceFromApi(cleanKey, "elevenlabs").catch(() => ({
+        balance: -1,
+        email: "",
+        source: "elevenlabs" as const,
+      })),
+      (async () => {
+        let models: Array<{ id: string; name: string }> = [];
+        try {
+          const resModels = await fetch("https://api.elevenlabs.io/v1/models", {
+            headers,
+            signal: AbortSignal.timeout(8000),
+          });
+          if (resModels.ok) {
+            const modelsData = await resModels.json();
+            models = (Array.isArray(modelsData) ? modelsData : [])
+              .filter((m: any) => m.can_do_text_to_speech !== false)
+              .map((m: any) => {
+                let customName = m.name || m.model_id;
+                if (m.model_id === "eleven_v3" || m.model_id === "eleven_multilingual_v3") {
+                  customName = "Eleven v3 (🚀 Model Mới Nhất - Siêu Biểu Cảm, Audio Tags [thì thầm, cười...])";
+                } else if (m.model_id === "eleven_multilingual_v2") {
+                  customName = "Eleven Multilingual v2 (⭐ Chuẩn Tiếng Việt & Đa Ngôn Ngữ Tốt Nhất)";
+                } else if (m.model_id === "eleven_turbo_v2_5") {
+                  customName = "Eleven Turbo v2.5 (Siêu Nhanh, Tự Nhiên & Tiếng Việt)";
+                } else if (m.model_id === "eleven_flash_v2_5") {
+                  customName = "Eleven Flash v2.5 (Tốc Độ Cao, Siêu Tiết Kiệm Ký Tự)";
+                }
+                return {
+                  id: m.model_id,
+                  name: customName,
+                };
+              });
+          }
+        } catch (e) {
+          console.warn("Failed to fetch ElevenLabs official models:", e);
+        }
+
+        // Ensure eleven_v3 is available
+        if (!models.some((m) => m.id === "eleven_v3" || m.id === "eleven_multilingual_v3")) {
+          models.unshift({
+            id: "eleven_v3",
+            name: "Eleven v3 (🚀 Model Mới Nhất - Siêu Biểu Cảm, Audio Tags [thì thầm, cười...])",
+          });
+        }
+
+        if (models.length === 0) {
+          models = [
+            { id: "eleven_v3", name: "Eleven v3 (🚀 Model Mới Nhất - Siêu Biểu Cảm, Audio Tags [thì thầm, cười...])" },
+            { id: "eleven_multilingual_v2", name: "Eleven Multilingual v2 (⭐ Chuẩn Tiếng Việt & Tự Nhiên)" },
+            { id: "eleven_turbo_v2_5", name: "Eleven Turbo v2.5 (Siêu Nhanh, Độ Trễ Thấp)" },
+            { id: "eleven_flash_v2_5", name: "Eleven Flash v2.5 (Tốc Độ Cao, Tiết Kiệm)" },
+            { id: "eleven_turbo_v2", name: "Eleven Turbo v2 (Tiếng Anh / Phổ Thông)" },
+            { id: "eleven_monolingual_v1", name: "Eleven Monolingual v1" },
+          ];
+        } else {
+          models.sort((a, b) => {
+            if (a.id === "eleven_v3") return -1;
+            if (b.id === "eleven_v3") return 1;
+            if (a.id === "eleven_multilingual_v2") return -1;
+            if (b.id === "eleven_multilingual_v2") return 1;
+            if (a.id === "eleven_turbo_v2_5") return -1;
+            if (b.id === "eleven_turbo_v2_5") return 1;
+            return 0;
+          });
+        }
+        return models;
+      })(),
+      (async () => {
+        let voices: Array<{ id: string; name: string; tag?: string; previewUrl?: string; isCloned?: boolean }> = [];
+        try {
+          const resVoices = await fetch("https://api.elevenlabs.io/v1/voices", {
+            headers,
+            signal: AbortSignal.timeout(8000),
+          });
+          if (resVoices.ok) {
+            const vData = await resVoices.json();
+            const rawVoices = vData.voices || [];
+            voices = rawVoices.map((v: any) => {
+              const isCloned = v.category === "cloned" || v.category === "professional" || v.category === "instant";
+              const gender = v.labels?.gender ? (v.labels.gender.toLowerCase() === "female" ? "Nữ" : "Nam") : "";
+              const accent = v.labels?.accent || "";
+              const descParts = [gender, accent, v.labels?.description || v.labels?.["use case"]].filter(Boolean);
+              const desc = descParts.length > 0 ? descParts.join(" - ") : (v.category || "Hệ Thống");
+              return {
+                id: v.voice_id,
+                name: `${isCloned ? "⭐ " : ""}${v.name} (${desc})`,
+                tag: isCloned ? "Giọng Clone Của Bạn" : v.category || "Default",
+                previewUrl: v.preview_url,
+                isCloned,
+              };
+            });
+
+            voices.sort((a, b) => {
+              if (a.isCloned && !b.isCloned) return -1;
+              if (!a.isCloned && b.isCloned) return 1;
+              return a.name.localeCompare(b.name);
+            });
+          }
+        } catch (e) {
+          console.warn("Failed to fetch ElevenLabs official voices:", e);
+        }
+
+        if (voices.length === 0) {
+          voices = [
+            { id: "21m00Tcm4TlvDq8ikWAM", name: "Rachel (Nữ - Truyền Cảm, Nhẹ Nhàng)", tag: "Nữ - Chuẩn" },
+            { id: "pNInz6obpgDQGcFmaJgB", name: "Adam (Nam - Sâu Lắng, Dày Dặn)", tag: "Nam - Chuẩn" },
+            { id: "ErXwobaYiN019PkySvjV", name: "Antoni (Nam - Tự Nhiên, Trẻ Trung)", tag: "Nam - Chuẩn" },
+            { id: "EXAVITQu4vr4xnSDxMaL", name: "Bella (Nữ - Ngọt Ngào, Trong Trẻo)", tag: "Nữ - Chuẩn" },
+            { id: "TxGEqnHWrfWFTfGW9XjX", name: "Josh (Nam - Giọng Đọc Trầm Ấm)", tag: "Nam - Chuẩn" },
+            { id: "VR6AewLTigWG4xSOukaG", name: "Arnold (Nam - Mạnh Mẽ, Quyết Đoán)", tag: "Nam - Chuẩn" },
+            { id: "yoZ06aMxZJJ28mfd3POQ", name: "Sam (Nam - Thân Thiện, Podcast)", tag: "Nam - Chuẩn" },
+            { id: "AZnzlk1XvdvUeBnXmlld", name: "Domi (Nữ - Năng Động, Rõ Ràng)", tag: "Nữ - Chuẩn" },
+            { id: "MF3mGyEYCl7XYWbV9V6O", name: "Elli (Nữ - Tự Nhiên, Kể Chuyện)", tag: "Nữ - Chuẩn" },
+          ];
+        }
+        return voices;
+      })(),
+    ]);
+
+    // Record / Update Cre balance in stored keys immediately
+    if (balanceInfo && balanceInfo.balance !== -1) {
+      const keysMap = loadKeys();
+      if (keysMap[cleanKey]) {
+        keysMap[cleanKey].balance = balanceInfo.balance;
+        if (balanceInfo.email) keysMap[cleanKey].email = balanceInfo.email;
+        keysMap[cleanKey].source = "elevenlabs";
+        if (balanceInfo.tier) keysMap[cleanKey].tier = balanceInfo.tier;
+        if (balanceInfo.limit) keysMap[cleanKey].limit = balanceInfo.limit;
+        if (balanceInfo.used !== undefined) keysMap[cleanKey].used = balanceInfo.used;
+        if (balanceInfo.status) keysMap[cleanKey].status = balanceInfo.status;
+      } else {
+        keysMap[cleanKey] = {
+          name: "ElevenLabs Key",
+          balance: balanceInfo.balance,
+          email: balanceInfo.email,
+          source: "elevenlabs",
+          tier: balanceInfo.tier,
+          limit: balanceInfo.limit,
+          used: balanceInfo.used,
+          status: balanceInfo.status,
+        };
+      }
+      saveKeys(keysMap);
+    }
+
+    return res.json({
+      models: modelsResult,
+      voices: voicesResult,
+      balance: balanceInfo?.balance ?? -1,
+      limit: balanceInfo?.limit,
+      used: balanceInfo?.used,
+      tier: balanceInfo?.tier,
+      email: balanceInfo?.email,
+      source: "elevenlabs",
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || "Lỗi khi kết nối tới ElevenLabs API" });
+  }
+});
+
+/**
+ * Smart API Key Routing based on Credit Balance and Cost:
+ * If selectedKey doesn't have enough balance (< requiredCre) and its balance is known,
+ * automatically prioritize keys that have balance >= requiredCre (or unknown balance).
+ * E.g., API 1 (100 Cre), API 2 (30 Cre), User needs 50 Cre -> Automatically pick API 1 first!
+ */
+function selectSmartCandidateKeys(
+  allKeys: string[],
+  keysDict: Record<string, StoredKey>,
+  selectedKey: string | undefined,
+  requiredCre: number,
+  preferredSource?: "elevenlabs" | "genmax"
+): { candidateKeys: string[]; switchedAutomatically: boolean; switchReason?: string } {
+  const hasSelected = !!(selectedKey && keysDict[selectedKey]);
+  const selectedBal = hasSelected ? (keysDict[selectedKey]?.balance ?? -1) : -1;
+  const isSelectedSufficient = hasSelected && (selectedBal === -1 || selectedBal >= requiredCre);
+
+  const getBal = (k: string) => keysDict[k]?.balance ?? -1;
+  const sourceMatches = (k: string) => {
+    if (!preferredSource) return true;
+    const src = keysDict[k]?.source;
+    return !src || src === preferredSource;
+  };
+
+  // Divide into buckets:
+  // 1. Sufficient: balance >= requiredCre
+  // 2. Unknown: balance === -1
+  // 3. Insufficient: 0 <= balance < requiredCre
+  const sufficientKeys: string[] = [];
+  const unknownKeys: string[] = [];
+  const insufficientKeys: string[] = [];
+
+  for (const k of allKeys) {
+    const bal = getBal(k);
+    if (bal >= requiredCre) {
+      sufficientKeys.push(k);
+    } else if (bal === -1) {
+      unknownKeys.push(k);
+    } else {
+      insufficientKeys.push(k);
+    }
+  }
+
+  // Sort inside buckets:
+  // Keys matching preferred source first, then highest balance first
+  const sortFn = (a: string, b: string) => {
+    const srcA = sourceMatches(a) ? 1 : 0;
+    const srcB = sourceMatches(b) ? 1 : 0;
+    if (srcA !== srcB) return srcB - srcA;
+    return getBal(b) - getBal(a);
+  };
+
+  sufficientKeys.sort(sortFn);
+  unknownKeys.sort(sortFn);
+  insufficientKeys.sort(sortFn);
+
+  let candidateKeys: string[] = [];
+  let switchedAutomatically = false;
+  let switchReason: string | undefined = undefined;
+
+  if (hasSelected && isSelectedSufficient) {
+    // Current key has enough Cre! Keep it first.
+    candidateKeys.push(selectedKey!);
+    for (const k of sufficientKeys) if (k !== selectedKey) candidateKeys.push(k);
+    for (const k of unknownKeys) if (k !== selectedKey) candidateKeys.push(k);
+    for (const k of insufficientKeys) if (k !== selectedKey) candidateKeys.push(k);
+  } else {
+    // Current key is missing or has INSUFFICIENT Cre (< requiredCre)
+    if (sufficientKeys.length > 0) {
+      candidateKeys = [...sufficientKeys, ...unknownKeys, ...insufficientKeys];
+      if (hasSelected && selectedBal >= 0 && selectedBal < requiredCre) {
+        switchedAutomatically = true;
+        const bestKey = candidateKeys[0];
+        const bestName = keysDict[bestKey]?.name || `Key (${bestKey.slice(0, 8)}...)`;
+        const bestBal = getBal(bestKey);
+        const selName = keysDict[selectedKey!]?.name || `Key (${selectedKey!.slice(0, 8)}...)`;
+        switchReason = `Tự động chuyển từ "${selName}" (${selectedBal} Cre) sang "${bestName}" (${bestBal.toLocaleString()} Cre) do yêu cầu ${requiredCre} Cre.`;
+        console.log(`[Smart Key Routing] ${switchReason}`);
+      }
+    } else if (unknownKeys.length > 0) {
+      candidateKeys = [...unknownKeys, ...insufficientKeys];
+      if (hasSelected && selectedBal >= 0 && selectedBal < requiredCre) {
+        switchedAutomatically = true;
+        const bestKey = candidateKeys[0];
+        const bestName = keysDict[bestKey]?.name || `Key (${bestKey.slice(0, 8)}...)`;
+        const selName = keysDict[selectedKey!]?.name || `Key (${selectedKey!.slice(0, 8)}...)`;
+        switchReason = `Tự động chuyển từ "${selName}" (${selectedBal} Cre) sang "${bestName}" (Chưa kiểm tra) do yêu cầu ${requiredCre} Cre.`;
+        console.log(`[Smart Key Routing] ${switchReason}`);
+      }
+    } else {
+      // No keys have sufficient Cre
+      if (hasSelected) candidateKeys.push(selectedKey!);
+      for (const k of insufficientKeys) if (k !== selectedKey) candidateKeys.push(k);
+    }
+  }
+
+  // Deduplicate
+  candidateKeys = Array.from(new Set(candidateKeys));
+
+  return { candidateKeys, switchedAutomatically, switchReason };
+}
+
+// Run TTS via ElevenLabs Official API (api.elevenlabs.io) with Multi-Key Rotation
+app.post("/api/elevenlabs/tts", async (req, res) => {
+  const {
+    text,
+    selectedKey,
+    voiceId,
+    modelId = "eleven_v3",
+    stability = 0.5,
+    similarityBoost = 0.75,
+    style = 0,
+    speed = 1.0,
+    useSpeakerBoost = true,
+    outputFormat = "mp3_44100_128",
+    latency = 0,
+  } = req.body;
+
+  if (!text || !text.trim()) {
+    return res.status(400).json({ error: "Vui lòng nhập văn bản cần đọc!" });
+  }
+  if (!voiceId) {
+    return res.status(400).json({ error: "Vui lòng chọn giọng đọc ElevenLabs hợp lệ!" });
+  }
+
+  const charCount = text.trim().length;
+  const keysDict = loadKeys();
+  const allKeys = Object.keys(keysDict);
+
+  if (allKeys.length === 0) {
+    return res.status(400).json({
+      error: `Chưa có API Key nào được lưu. Cần ít nhất ${charCount} ký tự. Vui lòng mở menu Quản Lý API Key để thêm key từ https://elevenlabs.io/app/api !`,
+    });
+  }
+
+  // Smart Candidate Selection based on Balance and Char Count
+  const smartRouting = selectSmartCandidateKeys(
+    allKeys,
+    keysDict,
+    selectedKey,
+    charCount,
+    "elevenlabs"
+  );
+  const candidateKeys = smartRouting.candidateKeys;
+  let switchReason = smartRouting.switchReason;
+
+  let lastErrorText = "";
+  let workingKey = "";
+  let workingKeyName = "";
+  let wasRotated = false;
+  let attemptsCount = 0;
+  let outputBuffer: Buffer | null = null;
+  const isPcm = outputFormat && outputFormat.startsWith("pcm");
+  const ext = isPcm ? "wav" : (outputFormat && outputFormat.startsWith("opus") ? "opus" : "mp3");
+
+  for (const currentKey of candidateKeys) {
+    attemptsCount++;
+    const keyInfo = keysDict[currentKey];
+    const keyName = keyInfo?.name || `Key (${currentKey.slice(0, 8)}...)`;
+
+    try {
+      console.log(`[ElevenLabs TTS] Thử Key: "${keyName}" - Model: ${modelId} - Format: ${outputFormat}`);
+
+      const queryParams = new URLSearchParams({
+        output_format: outputFormat || "mp3_44100_128",
+      });
+      if (latency && Number(latency) > 0) {
+        queryParams.set("optimize_streaming_latency", String(latency));
+      }
+
+      const url = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}?${queryParams.toString()}`;
+      const ttsRes = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "xi-api-key": currentKey,
+          "Accept": isPcm ? "audio/wav" : "audio/mpeg",
+        },
+        body: JSON.stringify({
+          text: text.trim(),
+          model_id: modelId || "eleven_v3",
+          voice_settings: {
+            stability: Number(stability) ?? 0.5,
+            similarity_boost: Number(similarityBoost) ?? 0.75,
+            style: Number(style) ?? 0.0,
+            use_speaker_boost: Boolean(useSpeakerBoost),
+            speed: Number(speed) ?? 1.0,
+          },
+        }),
+        signal: AbortSignal.timeout(40000),
+      });
+
+      if (!ttsRes.ok) {
+        let errDetail = "";
+        try {
+          const errJson = await ttsRes.json();
+          errDetail = errJson.detail?.message || errJson.detail?.status || JSON.stringify(errJson.detail) || "";
+        } catch {
+          errDetail = await ttsRes.text().catch(() => "");
+        }
+
+        const lowerErr = errDetail.toLowerCase();
+
+        const isCreditOrAuth =
+          ttsRes.status === 401 ||
+          ttsRes.status === 402 ||
+          ttsRes.status === 429 ||
+          lowerErr.includes("quota_exceeded") ||
+          lowerErr.includes("insufficient_credits") ||
+          lowerErr.includes("character_limit") ||
+          lowerErr.includes("unauthorized") ||
+          lowerErr.includes("invalid key");
+
+        if (isCreditOrAuth) {
+          const kMap = loadKeys();
+          if (kMap[currentKey]) {
+            kMap[currentKey].balance = 0;
+            saveKeys(kMap);
+          }
+          console.warn(`[Auto-Rotate ElevenLabs] Key "${keyName}" bị lỗi số dư (${errDetail}). Tự động chuyển sang key tiếp theo...`);
+          lastErrorText = `Key "${keyName}": ${errDetail || "Hết hạn mức ký tự (quota exceeded)"}`;
+          continue;
+        }
+
+        lastErrorText = `Key "${keyName}": ${errDetail || ttsRes.statusText}`;
+        continue;
+      }
+
+      // Success! Read binary audio data directly
+      const arrayBuf = await ttsRes.arrayBuffer();
+      outputBuffer = Buffer.from(arrayBuf);
+      workingKey = currentKey;
+      workingKeyName = keyName;
+      wasRotated = currentKey !== selectedKey || smartRouting.switchedAutomatically;
+      break;
+    } catch (err: any) {
+      console.warn(`[ElevenLabs TTS] Lỗi với key "${keyName}":`, err.message);
+      lastErrorText = err.message || "Lỗi kết nối ElevenLabs";
+      continue;
+    }
+  }
+
+  if (!outputBuffer || !workingKey) {
+    return res.status(400).json({
+      error: `Tất cả ${candidateKeys.length} API Key đều không tạo được giọng ElevenLabs (Cần ${charCount} ký tự). Chi tiết lỗi: ${lastErrorText}. Vui lòng nạp hoặc thêm API Key mới từ https://elevenlabs.io/app/api !`,
+      totalAttempted: candidateKeys.length,
+      lastError: lastErrorText,
+    });
+  }
+
+  const filename = `elevenlabs_${voiceId}_${Date.now()}.${ext}`;
+  const filepath = path.join(OUTPUTS_DIR, filename);
+  fs.writeFileSync(filepath, outputBuffer);
+
+  // Immediately deduct characters from recorded Cre balance
+  let remainingBal = -1;
+  const kMap = loadKeys();
+  if (kMap[workingKey]) {
+    if (typeof kMap[workingKey].balance === "number" && kMap[workingKey].balance > 0) {
+      kMap[workingKey].balance = Math.max(0, kMap[workingKey].balance - charCount);
+      remainingBal = kMap[workingKey].balance;
+    }
+    if (typeof kMap[workingKey].used === "number") {
+      kMap[workingKey].used += charCount;
+    }
+    saveKeys(kMap);
+  }
+
+  // Background refresh balance to fetch exact subscription status from ElevenLabs
+  setTimeout(() => {
+    fetchBalanceFromApi(workingKey, "elevenlabs").then((info) => {
+      const freshMap = loadKeys();
+      if (freshMap[workingKey]) {
+        if (info.balance !== -1) freshMap[workingKey].balance = info.balance;
+        if (info.email) freshMap[workingKey].email = info.email;
+        freshMap[workingKey].source = "elevenlabs";
+        if (info.tier) freshMap[workingKey].tier = info.tier;
+        if (info.limit) freshMap[workingKey].limit = info.limit;
+        if (info.used !== undefined) freshMap[workingKey].used = info.used;
+        saveKeys(freshMap);
+      }
+    });
+  }, 1000);
+
+  return res.json({
+    success: true,
+    audioUrl: `/outputs/${filename}`,
+    usedKey: workingKey,
+    usedKeyName: workingKeyName,
+    wasRotated,
+    switchReason: switchReason || (wasRotated ? `Đã tự động xoay sang "${workingKeyName}"` : undefined),
+    attemptsCount,
+    cost: charCount,
+    remainingBalance: remainingBal,
+  });
+});
+
 // Fetch GenMax Models & Voices
 app.get("/api/genmax/data", async (req, res) => {
   const { apiKey, provider } = req.query as { apiKey?: string; provider?: string };
@@ -232,112 +905,203 @@ app.get("/api/genmax/data", async (req, res) => {
     return res.status(400).json({ error: "Vui lòng chọn hoặc nhập API Key!" });
   }
 
-  const headers = { "xi-api-key": apiKey };
+  const cleanKey = apiKey.trim();
+
+  if (provider === "ElevenLabs_Official") {
+    // Forward to ElevenLabs Official handler
+    try {
+      const elRes = await fetch(`http://127.0.0.1:${PORT}/api/elevenlabs/data?apiKey=${encodeURIComponent(cleanKey)}`);
+      const elData = await elRes.json();
+      return res.status(elRes.status).json(elData);
+    } catch (e) {
+      // Fallback
+    }
+  }
+
+  const headers = { "xi-api-key": cleanKey };
   const providerKey = provider === "MiniMax" ? "minimax" : "elevenlabs";
 
   try {
-    // 1. Fetch Models
-    let models: Array<{ id: string; name: string }> = [];
-    try {
-      const resModels = await fetch(`https://api.genmax.io/v1/models?provider=${providerKey}`, {
-        headers,
-        signal: AbortSignal.timeout(8000),
-      });
-      if (resModels.ok) {
-        const modelsData = await resModels.json();
-        models = (Array.isArray(modelsData) ? modelsData : []).map((m: any) => ({
-          id: m.model_id || m.id,
-          name: m.name || m.model_id || m.id,
-        }));
-      }
-    } catch (e) {
-      console.warn("Failed to fetch models from API:", e);
-    }
+    // Parallel fetch: Models, Voices, and User Balance
+    const [balanceInfo, modelsResult, voicesResult] = await Promise.all([
+      fetchBalanceFromApi(cleanKey, "genmax").catch(() => ({
+        balance: -1,
+        email: "",
+        source: "genmax" as const,
+      })),
+      (async () => {
+        let models: Array<{ id: string; name: string }> = [];
+        try {
+          const resModels = await fetch(`https://api.genmax.io/v1/models?provider=${providerKey}`, {
+            headers,
+            signal: AbortSignal.timeout(8000),
+          });
+          if (resModels.ok) {
+            const modelsData = await resModels.json();
+            models = (Array.isArray(modelsData) ? modelsData : []).map((m: any) => {
+              const id = m.model_id || m.id;
+              let name = m.name || id;
+              if (id === "eleven_v3" || id === "eleven_multilingual_v3") {
+                name = "Eleven v3 (🚀 Model v3 Mới Nhất - Siêu Biểu Cảm, Audio Tags [thì thầm, cười...])";
+              } else if (id === "eleven_multilingual_v2") {
+                name = "Eleven Multilingual v2 (⭐ Chuẩn Tiếng Việt & Đa Ngôn Ngữ Tốt Nhất)";
+              } else if (id === "eleven_turbo_v2_5") {
+                name = "Eleven Turbo v2.5 (Siêu Nhanh, Tự Nhiên & Tiếng Việt)";
+              } else if (id === "eleven_flash_v2_5") {
+                name = "Eleven Flash v2.5 (Tốc Độ Cao, Siêu Tiết Kiệm Ký Tự)";
+              }
+              return { id, name };
+            });
+          }
+        } catch (e) {
+          console.warn("Failed to fetch models from API:", e);
+        }
 
-    if (models.length === 0) {
-      models =
-        providerKey === "elevenlabs"
-          ? [
-              { id: "eleven_turbo_v2_5", name: "Eleven Turbo v2.5 (Nhanh & Tự Nhiên)" },
-              { id: "eleven_multilingual_v2", name: "Eleven Multilingual v2 (Đa Ngôn Ngữ Chuẩn)" },
-              { id: "eleven_monolingual_v1", name: "Eleven Monolingual v1" },
-            ]
-          : [
-              { id: "speech-2.8-turbo", name: "MiniMax Speech 2.8 Turbo" },
-              { id: "speech-2.5", name: "MiniMax Speech 2.5" },
+        if (providerKey === "elevenlabs") {
+          // Ensure eleven_v3 is available
+          if (!models.some((m) => m.id === "eleven_v3" || m.id === "eleven_multilingual_v3")) {
+            models.unshift({
+              id: "eleven_v3",
+              name: "Eleven v3 (🚀 Model v3 Mới Nhất - Siêu Biểu Cảm, Audio Tags [thì thầm, cười...])",
+            });
+          }
+          models.sort((a, b) => {
+            if (a.id === "eleven_v3") return -1;
+            if (b.id === "eleven_v3") return 1;
+            if (a.id === "eleven_multilingual_v2") return -1;
+            if (b.id === "eleven_multilingual_v2") return 1;
+            if (a.id === "eleven_turbo_v2_5") return -1;
+            if (b.id === "eleven_turbo_v2_5") return 1;
+            return 0;
+          });
+        }
+
+        if (models.length === 0) {
+          models =
+            providerKey === "elevenlabs"
+              ? [
+                  { id: "eleven_v3", name: "Eleven v3 (🚀 Model v3 Mới Nhất - Siêu Biểu Cảm, Audio Tags [thì thầm, cười...])" },
+                  { id: "eleven_multilingual_v2", name: "Eleven Multilingual v2 (⭐ Chuẩn Tiếng Việt & Đa Ngôn Ngữ Tốt Nhất)" },
+                  { id: "eleven_turbo_v2_5", name: "Eleven Turbo v2.5 (Siêu Nhanh, Tự Nhiên & Tiếng Việt)" },
+                  { id: "eleven_flash_v2_5", name: "Eleven Flash v2.5 (Tốc Độ Cao, Siêu Tiết Kiệm Ký Tự)" },
+                  { id: "eleven_monolingual_v1", name: "Eleven Monolingual v1" },
+                ]
+              : [
+                  { id: "speech-2.8-turbo", name: "MiniMax Speech 2.8 Turbo" },
+                  { id: "speech-01-turbo", name: "MiniMax Speech 01 Turbo" },
+                  { id: "speech-2.5", name: "MiniMax Speech 2.5" },
+                ];
+        }
+        return models;
+      })(),
+      (async () => {
+        let voices: Array<{ id: string; name: string; tag?: string; previewUrl?: string }> = [];
+
+        if (providerKey === "elevenlabs") {
+          try {
+            const resVoices = await fetch("https://api.genmax.io/v1/default-voices?page_size=100", {
+              headers,
+              signal: AbortSignal.timeout(8000),
+            });
+            if (resVoices.ok) {
+              const vData = await resVoices.json();
+              const rawVoices = vData.voices || [];
+              voices = rawVoices.map((v: any) => ({
+                id: v.voice_id || v.id,
+                name: `${v.name || "Voice"} (${v.accent || v.category || "Tiếng Việt / Quốc Tế"})`,
+                tag: v.category || v.accent || "Default",
+                previewUrl: v.preview_url,
+              }));
+            }
+          } catch (e) {
+            console.warn("Failed to fetch ElevenLabs voices:", e);
+          }
+
+          // Default fallback voices for ElevenLabs
+          const hasAdam = voices.some((v) => v.name.toLowerCase().includes("adam"));
+          if (!hasAdam) {
+            voices.unshift({
+              id: "pNInz6obpgDQGcFmaJgB",
+              name: "Adam (Nam - Giọng Đọc Chuẩn Sâu Lắng)",
+              tag: "Nam - Chuẩn",
+            });
+          }
+          if (!voices.some((v) => v.name.toLowerCase().includes("rachel"))) {
+            voices.unshift({
+              id: "21m00Tcm4TlvDq8ikWAM",
+              name: "Rachel (Nữ - Truyền Cảm, Nhẹ Nhàng)",
+              tag: "Nữ - Chuẩn",
+            });
+          }
+        } else {
+          // MiniMax voices
+          try {
+            const resVoices = await fetch("https://api.genmax.io/v1/minimax/system-voices?page_size=100", {
+              headers,
+              signal: AbortSignal.timeout(8000),
+            });
+            if (resVoices.ok) {
+              const vData = await resVoices.json();
+              const rawVoices = vData.voice_list || [];
+              voices = rawVoices.map((v: any) => ({
+                id: v.uniq_id || v.voice_id || v.id,
+                name: `${v.voice_name || "Voice"} (${(v.tag_list || []).join(", ") || "Hệ Thống"})`,
+                tag: (v.tag_list || []).join(", "),
+              }));
+            }
+          } catch (e) {
+            console.warn("Failed to fetch MiniMax voices:", e);
+          }
+
+          if (voices.length === 0) {
+            voices = [
+              { id: "male-qn-qingse", name: "Thanh Niên Trẻ (Nam - Truyền Cảm)", tag: "Nam Trẻ" },
+              { id: "female-shaonv", name: "Thiếu Nữ (Nữ - Ngọt Ngào)", tag: "Nữ Trẻ" },
+              { id: "presenter_male", name: "Phát Thanh Viên (Nam - Tin Tức)", tag: "Phát Thanh" },
+              { id: "presenter_female", name: "Phát Thanh Viên (Nữ - Tin Tức)", tag: "Phát Thanh" },
             ];
+          }
+        }
+        return voices;
+      })(),
+    ]);
+
+    // Record / Update Cre balance in stored keys immediately
+    if (balanceInfo && balanceInfo.balance !== -1) {
+      const keysMap = loadKeys();
+      if (keysMap[cleanKey]) {
+        keysMap[cleanKey].balance = balanceInfo.balance;
+        if (balanceInfo.email) keysMap[cleanKey].email = balanceInfo.email;
+        keysMap[cleanKey].source = "genmax";
+        if (balanceInfo.tier) keysMap[cleanKey].tier = balanceInfo.tier;
+        if (balanceInfo.limit) keysMap[cleanKey].limit = balanceInfo.limit;
+        if (balanceInfo.used !== undefined) keysMap[cleanKey].used = balanceInfo.used;
+        if (balanceInfo.status) keysMap[cleanKey].status = balanceInfo.status;
+      } else {
+        keysMap[cleanKey] = {
+          name: "GenMax Key",
+          balance: balanceInfo.balance,
+          email: balanceInfo.email,
+          source: "genmax",
+          tier: balanceInfo.tier,
+          limit: balanceInfo.limit,
+          used: balanceInfo.used,
+          status: balanceInfo.status,
+        };
+      }
+      saveKeys(keysMap);
     }
 
-    // 2. Fetch Voices
-    let voices: Array<{ id: string; name: string; tag?: string; previewUrl?: string }> = [];
-
-    if (providerKey === "elevenlabs") {
-      try {
-        const resVoices = await fetch("https://api.genmax.io/v1/default-voices?page_size=100", {
-          headers,
-          signal: AbortSignal.timeout(8000),
-        });
-        if (resVoices.ok) {
-          const vData = await resVoices.json();
-          const rawVoices = vData.voices || [];
-          voices = rawVoices.map((v: any) => ({
-            id: v.voice_id || v.id,
-            name: `${v.name || "Voice"} (${v.accent || v.category || "Tiếng Việt / Quốc Tế"})`,
-            tag: v.category || v.accent || "Default",
-            previewUrl: v.preview_url,
-          }));
-        }
-      } catch (e) {
-        console.warn("Failed to fetch ElevenLabs voices:", e);
-      }
-
-      // Default fallback voices for ElevenLabs
-      const hasAdam = voices.some((v) => v.name.toLowerCase().includes("adam"));
-      if (!hasAdam) {
-        voices.unshift({
-          id: "pNInz6obpgDQGcFmaJgB",
-          name: "Adam (Nam - Giọng Đọc Chuẩn Sâu Lắng)",
-          tag: "Nam - Chuẩn",
-        });
-      }
-      if (!voices.some((v) => v.name.toLowerCase().includes("rachel"))) {
-        voices.unshift({
-          id: "21m00Tcm4TlvDq8ikWAM",
-          name: "Rachel (Nữ - Truyền Cảm, Nhẹ Nhàng)",
-          tag: "Nữ - Chuẩn",
-        });
-      }
-    } else {
-      // MiniMax voices
-      try {
-        const resVoices = await fetch("https://api.genmax.io/v1/minimax/system-voices?page_size=100", {
-          headers,
-          signal: AbortSignal.timeout(8000),
-        });
-        if (resVoices.ok) {
-          const vData = await resVoices.json();
-          const rawVoices = vData.voice_list || [];
-          voices = rawVoices.map((v: any) => ({
-            id: v.uniq_id || v.voice_id || v.id,
-            name: `${v.voice_name || "Voice"} (${(v.tag_list || []).join(", ") || "Hệ Thống"})`,
-            tag: (v.tag_list || []).join(", "),
-          }));
-        }
-      } catch (e) {
-        console.warn("Failed to fetch MiniMax voices:", e);
-      }
-
-      if (voices.length === 0) {
-        voices = [
-          { id: "male-qn-qingse", name: "Thanh Niên Trẻ (Nam - Truyền Cảm)", tag: "Nam Trẻ" },
-          { id: "female-shaonv", name: "Thiếu Nữ (Nữ - Ngọt Ngào)", tag: "Nữ Trẻ" },
-          { id: "presenter_male", name: "Phát Thanh Viên (Nam - Tin Tức)", tag: "Phát Thanh" },
-          { id: "presenter_female", name: "Phát Thanh Viên (Nữ - Tin Tức)", tag: "Phát Thanh" },
-        ];
-      }
-    }
-
-    return res.json({ models, voices });
+    return res.json({
+      models: modelsResult,
+      voices: voicesResult,
+      balance: balanceInfo?.balance ?? -1,
+      limit: balanceInfo?.limit,
+      used: balanceInfo?.used,
+      tier: balanceInfo?.tier,
+      email: balanceInfo?.email,
+      source: "genmax",
+    });
   } catch (err: any) {
     return res.status(500).json({ error: err.message || "Lỗi khi lấy dữ liệu từ GenMax" });
   }
@@ -356,6 +1120,8 @@ app.post("/api/genmax/tts", async (req, res) => {
     style = 0,
     speed = 1.0,
     pitch = 0,
+    volume = 1.0,
+    useSpeakerBoost = true,
   } = req.body;
 
   if (!text || !text.trim()) {
@@ -363,6 +1129,20 @@ app.post("/api/genmax/tts", async (req, res) => {
   }
   if (!voiceId) {
     return res.status(400).json({ error: "Vui lòng chọn giọng đọc hợp lệ!" });
+  }
+
+  if (provider === "ElevenLabs_Official") {
+    try {
+      const elRes = await fetch(`http://127.0.0.1:${PORT}/api/elevenlabs/tts`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req.body),
+      });
+      const elData = await elRes.json();
+      return res.status(elRes.status).json(elData);
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || "Lỗi khi gọi ElevenLabs Official TTS" });
+    }
   }
 
   const cost = text.trim().length;
@@ -375,50 +1155,41 @@ app.post("/api/genmax/tts", async (req, res) => {
     });
   }
 
-  // Build candidate keys list with prioritized rotation order
-  const candidateKeys: string[] = [];
-  
-  // 1. If user selected a key and it is in keysDict, try it first
-  if (selectedKey && keysDict[selectedKey]) {
-    candidateKeys.push(selectedKey);
-  }
-
-  // 2. Add keys with known sufficient balance or unknown (-1)
-  const remainingKeys = allKeys.filter((k) => k !== selectedKey);
-  remainingKeys.sort((a, b) => {
-    const balA = keysDict[a]?.balance ?? -1;
-    const balB = keysDict[b]?.balance ?? -1;
-    // Prioritize higher balance first
-    return balB - balA;
-  });
-
-  for (const k of remainingKeys) {
-    candidateKeys.push(k);
-  }
+  // Smart Candidate Selection based on Balance and Cost (e.g. 50 Cre needed, API 2 has 30, API 1 has 100 -> auto pick API 1)
+  const preferredSource = provider === "ElevenLabs" ? "elevenlabs" : "genmax";
+  const smartRouting = selectSmartCandidateKeys(
+    allKeys,
+    keysDict,
+    selectedKey,
+    cost,
+    preferredSource
+  );
+  const candidateKeys = smartRouting.candidateKeys;
+  let switchReason = smartRouting.switchReason;
 
   const url = `https://api.genmax.io/v1/text-to-speech/${voiceId}`;
   const payloadBase: any = {
     text: text.trim(),
-    model_id: modelId || (provider === "MiniMax" ? "speech-2.8-turbo" : "eleven_turbo_v2_5"),
+    model_id: modelId || (provider === "MiniMax" ? "speech-2.8-turbo" : "eleven_v3"),
   };
 
   if (provider === "MiniMax") {
     payloadBase.provider = "minimax";
     payloadBase.language_code = "Vietnamese";
     payloadBase.voice_settings = {
-      speed: Number(speed) || 1.0,
-      pitch: Number(pitch) || 0,
-      vol: 1.0,
+      speed: Number(speed) ?? 1.0,
+      pitch: Number(pitch) ?? 0,
+      vol: Number(volume) ?? 1.0,
     };
   } else {
     payloadBase.provider = "elevenlabs";
     payloadBase.language_code = "vi";
     payloadBase.voice_settings = {
-      stability: Number(stability) || 0.5,
-      similarity_boost: Number(similarityBoost) || 0.75,
-      style: Number(style) || 0.0,
-      use_speaker_boost: true,
-      speed: Number(speed) || 1.0,
+      stability: Number(stability) ?? 0.5,
+      similarity_boost: Number(similarityBoost) ?? 0.75,
+      style: Number(style) ?? 0.0,
+      use_speaker_boost: Boolean(useSpeakerBoost),
+      speed: Number(speed) ?? 1.0,
     };
   }
 
@@ -510,7 +1281,7 @@ app.post("/api/genmax/tts", async (req, res) => {
           completedAudioUrl = directAudio;
           workingKey = currentKey;
           workingKeyName = keyName;
-          wasRotated = currentKey !== selectedKey;
+          wasRotated = currentKey !== selectedKey || smartRouting.switchedAutomatically;
           break;
         }
         lastErrorText = "Không nhận được Task ID từ GenMax";
@@ -545,7 +1316,7 @@ app.post("/api/genmax/tts", async (req, res) => {
       if (pollSucceeded && completedAudioUrl) {
         workingKey = currentKey;
         workingKeyName = keyName;
-        wasRotated = currentKey !== selectedKey;
+        wasRotated = currentKey !== selectedKey || smartRouting.switchedAutomatically;
         break; // Successfully generated audio!
       }
     } catch (tryErr: any) {
@@ -577,14 +1348,32 @@ app.post("/api/genmax/tts", async (req, res) => {
     console.warn("Could not cache audio locally, will use direct URL:", saveErr);
   }
 
+  // Immediately deduct cost from recorded Cre balance
+  let remainingBal = -1;
+  const kMap = loadKeys();
+  if (kMap[workingKey]) {
+    if (typeof kMap[workingKey].balance === "number" && kMap[workingKey].balance > 0) {
+      kMap[workingKey].balance = Math.max(0, kMap[workingKey].balance - cost);
+      remainingBal = kMap[workingKey].balance;
+    }
+    if (typeof kMap[workingKey].used === "number") {
+      kMap[workingKey].used += cost;
+    }
+    saveKeys(kMap);
+  }
+
   // Background refresh balance for the working key
   setTimeout(() => {
-    fetchBalanceFromApi(workingKey).then(({ balance, email }) => {
-      const kMap = loadKeys();
-      if (kMap[workingKey]) {
-        if (balance !== -1) kMap[workingKey].balance = balance;
-        if (email) kMap[workingKey].email = email;
-        saveKeys(kMap);
+    fetchBalanceFromApi(workingKey, "genmax").then((info) => {
+      const freshMap = loadKeys();
+      if (freshMap[workingKey]) {
+        if (info.balance !== -1) freshMap[workingKey].balance = info.balance;
+        if (info.email) freshMap[workingKey].email = info.email;
+        freshMap[workingKey].source = "genmax";
+        if (info.tier) freshMap[workingKey].tier = info.tier;
+        if (info.limit) freshMap[workingKey].limit = info.limit;
+        if (info.used !== undefined) freshMap[workingKey].used = info.used;
+        saveKeys(freshMap);
       }
     });
   }, 1000);
@@ -598,9 +1387,11 @@ app.post("/api/genmax/tts", async (req, res) => {
     usedKey: workingKey,
     usedKeyName: workingKeyName,
     wasRotated,
+    switchReason: switchReason || (wasRotated ? `Đã tự động xoay sang "${workingKeyName}"` : undefined),
     attemptsCount,
     cost,
     taskId,
+    remainingBalance: remainingBal,
   });
 });
 

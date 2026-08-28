@@ -1,4 +1,4 @@
-export type ProviderType = 'ElevenLabs' | 'MiniMax' | 'OpenSpeaker' | 'Edge';
+export type ProviderType = 'ElevenLabs_Official' | 'ElevenLabs' | 'MiniMax' | 'OpenSpeaker' | 'Edge';
 
 export interface KeyItem {
   key: string;
@@ -6,7 +6,11 @@ export interface KeyItem {
   balance: number;
   email: string;
   label: string;
-  source?: 'genmax' | 'openspeaker';
+  source?: 'elevenlabs' | 'genmax' | 'openspeaker';
+  tier?: string;
+  limit?: number;
+  used?: number;
+  status?: string;
 }
 
 export interface VoiceOption {
@@ -16,6 +20,11 @@ export interface VoiceOption {
   provider?: string;
   lang?: string;
   previewUrl?: string;
+  category?: string;
+  gender?: string;
+  accent?: string;
+  description?: string;
+  isCloned?: boolean;
 }
 
 export interface ModelOption {
@@ -29,6 +38,10 @@ export interface VoiceSettings {
   style: number;
   speed: number;
   pitch: number;
+  volume?: number;
+  useSpeakerBoost?: boolean;
+  outputFormat?: string;
+  latency?: number;
   quality?: 'high' | 'low';
 }
 

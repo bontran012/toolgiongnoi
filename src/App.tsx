@@ -45,13 +45,22 @@ export function App() {
 
     // Fallback to local storage (e.g. on Netlify / Static hosting)
     const local = getLocalKeys();
-    const formatted: KeyItem[] = local.map((k) => ({
-      key: k.key,
-      name: k.name,
-      balance: k.balance,
-      email: k.email,
-      label: `[${k.balance !== -1 ? k.balance.toLocaleString() : 'Kiểm tra'} Cr] ${k.name} (${k.key.slice(0, 8)}...)`,
-    }));
+    const formatted: KeyItem[] = local.map((k) => {
+      const isEleven = k.source === 'elevenlabs';
+      const tag = isEleven ? '🌟 [ElevenLabs]' : '⚡ [GenMax]';
+      return {
+        key: k.key,
+        name: k.name,
+        balance: k.balance,
+        email: k.email,
+        source: k.source,
+        tier: k.tier,
+        limit: k.limit,
+        used: k.used,
+        status: k.status,
+        label: `${tag} [${k.balance !== -1 ? k.balance.toLocaleString() : 'Kiểm tra'} Cre] ${k.name} (${k.key.slice(0, 8)}...)`,
+      };
+    });
     setKeys(formatted);
     if (formatted.length > 0 && !selectedKey) {
       setSelectedKey(formatted[0].key);
@@ -106,6 +115,7 @@ export function App() {
             onSelectKey={setSelectedKey}
             onOpenKeyManager={() => setIsKeyManagerOpen(true)}
             onAudioGenerated={handleAudioGenerated}
+            onKeysUpdated={loadKeys}
           />
         )}
 

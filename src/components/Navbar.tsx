@@ -59,7 +59,7 @@ export const Navbar: React.FC<NavbarProps> = ({
               }`}
             >
               <Cloud className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Online (GenMax)</span>
+              <span className="hidden sm:inline">Online (ElevenLabs/GenMax)</span>
               <span className="sm:hidden">Online</span>
             </button>
 
@@ -99,19 +99,26 @@ export const Navbar: React.FC<NavbarProps> = ({
               id="btn-open-key-manager"
               onClick={onOpenKeyManager}
               className="flex items-center space-x-2 px-3 py-1.5 bg-slate-900 hover:bg-slate-800/90 border border-slate-800 rounded-xl text-xs text-slate-300 transition group"
-              title="Quản lý API Key GenMax"
+              title="Quản lý API Key ElevenLabs / GenMax"
             >
               <Key className="w-3.5 h-3.5 text-blue-400 group-hover:scale-110 transition-transform" />
               <div className="text-left hidden md:block">
-                <div className="font-semibold leading-tight text-slate-200 truncate max-w-[110px]">
-                  {currentKeyItem?.name || 'Chưa chọn Key'}
+                <div className="flex items-center gap-1 font-semibold leading-tight text-slate-200 truncate max-w-[140px]">
+                  <span className="truncate">{currentKeyItem?.name || 'Chưa chọn Key'}</span>
+                  {currentKeyItem?.source && (
+                    <span className="text-[9px] px-1 py-0.2 rounded bg-slate-800 text-slate-400">
+                      {currentKeyItem.source === 'elevenlabs' ? 'EL' : 'GM'}
+                    </span>
+                  )}
                 </div>
-                <div className="text-[10px] text-emerald-400 font-bold">
-                  {currentKeyItem && currentKeyItem.balance !== -1
-                    ? `${currentKeyItem.balance.toLocaleString()} Cr`
-                    : keys.length > 0
-                    ? 'Có API Key'
-                    : 'Thêm Key'}
+                <div className="text-[10px] text-emerald-400 font-bold flex items-center gap-1">
+                  {currentKeyItem && currentKeyItem.balance !== -1 ? (
+                    <span>{currentKeyItem.balance.toLocaleString()} Cre</span>
+                  ) : keys.length > 0 ? (
+                    <span>Có API Key</span>
+                  ) : (
+                    <span>Thêm Key</span>
+                  )}
                 </div>
               </div>
             </button>
